@@ -78,6 +78,9 @@ struct call {
 
 	struct config_avt config_avt;
 	struct config_call config_call;
+
+	uint32_t rtp_timeout_ms;  /**< RTP Timeout in [ms]                  */
+	uint32_t linenum;         /**< Line number from 1 to N              */
 };
 
 
@@ -119,13 +122,24 @@ static void call_stream_start(struct call *call, bool active)
 		if (ac) {
 			err  = audio_encoder_set(call->audio, sc->data,
 						 sc->pt, sc->params);
+			if (err) {
+				warning("call: start:"
+					" audio_encoder_set error: %m\n", err);
+			}
 			err |= audio_decoder_set(call->audio, sc->data,
 						 sc->pt, sc->params);
+			if (err) {
+				warning("call: start:"
+					" audio_decoder_set error: %m\n", err);
+			}
+
 			if (!err) {
 				err = audio_start(call->audio);
-			}
-			if (err) {
-				warning("call: audio stream error: %m\n", err);
+				if (err) {
+					warning("call: start:"
+						" audio_start error: %m\n",
+						err);
+				}
 			}
 		}
 		else {
@@ -376,7 +390,7 @@ static void audio_event_handler(int key, bool end, void *arg)
 	info("received event: '%c' (end=%d)\n", key, end);
 
 	if (call->dtmfh)
-		call->dtmfh(call, end ? 0x00 : key, call->arg);
+		call->dtmfh(call, end ? KEYCODE_REL : key, call->arg);
 }
 
 
@@ -420,6 +434,38 @@ static void menc_error_handler(int err, void *arg)
 }
 
 
+static void stream_error_handler(struct stream *strm, int err, void *arg)
+{
+	struct call *call = arg;
+	MAGIC_CHECK(call);
+
+	info("call: error in \"%s\" rtp stream (%m)\n",
+		sdp_media_name(stream_sdpmedia(strm)), err);
+
+	call->scode = 701;
+	set_state(call, STATE_TERMINATED);
+
+	call_stream_stop(call);
+	call_event_handler(call, CALL_EVENT_CLOSED, "rtp stream error");
+}
+
+
+static int assign_linenum(uint32_t *linenum, const struct list *lst)
+{
+	uint32_t num;
+
+	for (num=CALL_LINENUM_MIN; num<CALL_LINENUM_MAX; num++) {
+
+		if (!call_find_linenum(lst, num)) {
+			*linenum = num;
+			return 0;
+		}
+	}
+
+	return ENOENT;
+}
+
+
 /**
  * Allocate a new Call state object
  *
@@ -433,6 +479,7 @@ static void menc_error_handler(int err, void *arg)
  * @param prm         Call parameters
  * @param msg         SIP message for incoming calls
  * @param xcall       Optional call to inherit properties from
+ * @param dnsc        DNS Client
  * @param eh          Call event handler
  * @param arg         Handler argument
  *
@@ -442,16 +489,21 @@ int call_alloc(struct call **callp, const struct config *cfg, struct list *lst,
 	       const char *local_name, const char *local_uri,
 	       struct account *acc, struct ua *ua, const struct call_prm *prm,
 	       const struct sip_msg *msg, struct call *xcall,
+	       struct dnsc *dnsc,
 	       call_event_h *eh, void *arg)
 {
 	struct call *call;
+	struct le *le;
 	enum vidmode vidmode = prm ? prm->vidmode : VIDMODE_OFF;
 	bool use_video = true, got_offer = false;
 	int label = 0;
 	int err = 0;
 
-	if (!cfg || !local_uri || !acc || !ua)
+	if (!cfg || !local_uri || !acc || !ua || !prm)
 		return EINVAL;
+
+	debug("call: alloc with params laddr=%j, af=%s\n",
+	      &prm->laddr, net_af2name(prm->af));
 
 	call = mem_zalloc(sizeof(*call), call_destructor);
 	if (!call)
@@ -478,8 +530,7 @@ int call_alloc(struct call **callp, const struct config *cfg, struct list *lst,
 		goto out;
 
 	/* Init SDP info */
-	err = sdp_session_alloc(&call->sdp,
-				net_laddr_af(baresip_network(), call->af));
+	err = sdp_session_alloc(&call->sdp, &prm->laddr);
 	if (err)
 		goto out;
 
@@ -495,7 +546,7 @@ int call_alloc(struct call **callp, const struct config *cfg, struct list *lst,
 	/* Initialise media NAT handling */
 	if (acc->mnat) {
 		err = acc->mnat->sessh(&call->mnats,
-				       net_dnsc(baresip_network()), call->af,
+				       dnsc, call->af,
 				       acc->stun_host, acc->stun_port,
 				       acc->stun_user, acc->stun_pass,
 				       call->sdp, !got_offer,
@@ -567,6 +618,24 @@ int call_alloc(struct call **callp, const struct config *cfg, struct list *lst,
 		call->not = mem_ref(xcall->not);
 	}
 
+	FOREACH_STREAM {
+		struct stream *strm = le->data;
+		stream_set_error_handler(strm, stream_error_handler, call);
+	}
+
+	if (cfg->avt.rtp_timeout) {
+		call_enable_rtp_timeout(call, cfg->avt.rtp_timeout*1000);
+	}
+
+	err = assign_linenum(&call->linenum, lst);
+	if (err) {
+		warning("call: could not assign linenumber\n");
+		goto out;
+	}
+
+	/* NOTE: The new call must always be added to the tail of list,
+	 *       which indicates the current call.
+	 */
 	list_append(lst, &call->le, call);
 
  out:
@@ -928,7 +997,8 @@ int call_info(struct re_printf *pf, const struct call *call)
 	if (!call)
 		return 0;
 
-	return re_hprintf(pf, "%H  %9s  %s  %s", print_duration, call,
+	return re_hprintf(pf, "[line %u]  %H  %9s  %s  %s", call->linenum,
+			  print_duration, call,
 			  state_name(call->state),
 			  call->on_hold ? "(on hold)" : "         ",
 			  call->peer_uri);
@@ -939,7 +1009,7 @@ int call_info(struct re_printf *pf, const struct call *call)
  * Send a DTMF digit to the peer
  *
  * @param call  Call object
- * @param key   DTMF digit to send (0x00 for key release)
+ * @param key   DTMF digit to send (KEYCODE_REL for key release)
  *
  * @return 0 if success, otherwise errorcode
  */
@@ -1033,6 +1103,16 @@ static void sipsess_estab_handler(const struct sip_msg *msg, void *arg)
 
 	call_stream_start(call, true);
 
+	if (call->rtp_timeout_ms) {
+
+		struct le *le;
+
+		FOREACH_STREAM {
+			struct stream *strm = le->data;
+			stream_enable_rtp_timeout(strm, call->rtp_timeout_ms);
+		}
+	}
+
 	/* the transferor will hangup this call */
 	if (call->not) {
 		(void)call_notify_sipfrag(call, 200, "OK");
@@ -1070,7 +1150,7 @@ static void dtmfend_handler(void *arg)
 	struct call *call = arg;
 
 	if (call->dtmfh)
-		call->dtmfh(call, 0x00, call->arg);
+		call->dtmfh(call, KEYCODE_REL, call->arg);
 }
 
 
@@ -1499,13 +1579,12 @@ struct list *call_streaml(const struct call *call)
 }
 
 
-int call_reset_transp(struct call *call)
+int call_reset_transp(struct call *call, const struct sa *laddr)
 {
 	if (!call)
 		return EINVAL;
 
-	sdp_session_set_laddr(call->sdp,
-			      net_laddr_af(baresip_network(), call->af));
+	sdp_session_set_laddr(call->sdp, laddr);
 
 	return call_modify(call);
 }
@@ -1715,4 +1794,51 @@ bool call_is_onhold(const struct call *call)
 bool call_is_outgoing(const struct call *call)
 {
 	return call ? call->outgoing : false;
+}
+
+
+void call_enable_rtp_timeout(struct call *call, uint32_t timeout_ms)
+{
+	if (!call)
+		return;
+
+	call->rtp_timeout_ms = timeout_ms;
+}
+
+
+/**
+ * Get the line number for this call
+ *
+ * @param call Call object
+ *
+ * @return Line number from 1 to N
+ */
+uint32_t call_linenum(const struct call *call)
+{
+	return call ? call->linenum : 0;
+}
+
+
+struct call *call_find_linenum(const struct list *calls, uint32_t linenum)
+{
+	struct le *le;
+
+	for (le = list_head(calls); le; le = le->next) {
+		struct call *call = le->data;
+
+		if (linenum == call->linenum)
+			return call;
+	}
+
+	return NULL;
+}
+
+
+void call_set_current(struct list *calls, struct call *call)
+{
+	if (!calls || !call)
+		return;
+
+	list_unlink(&call->le);
+	list_append(calls, &call->le, call);
 }

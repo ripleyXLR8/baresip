@@ -32,7 +32,8 @@ static struct config core_config = {
 
 	/** Call config */
 	{
-		120
+		120,
+		4
 	},
 
 	/** Audio */
@@ -70,7 +71,8 @@ static struct config core_config = {
 		true,
 		false,
 		{5, 10},
-		false
+		false,
+		0
 	},
 
 	/* Network */
@@ -160,6 +162,8 @@ int config_parse_conf(struct config *cfg, const struct conf *conf)
 	/* Call */
 	(void)conf_get_u32(conf, "call_local_timeout",
 			   &cfg->call.local_timeout);
+	(void)conf_get_u32(conf, "call_max_calls",
+			   &cfg->call.max_calls);
 
 	/* Audio */
 	(void)conf_get_str(conf, "audio_path", cfg->audio.audio_path,
@@ -223,6 +227,7 @@ int config_parse_conf(struct config *cfg, const struct conf *conf)
 	(void)conf_get_range(conf, "jitter_buffer_delay",
 			     &cfg->avt.jbuf_del);
 	(void)conf_get_bool(conf, "rtp_stats", &cfg->avt.rtp_stats);
+	(void)conf_get_u32(conf, "rtp_timeout", &cfg->avt.rtp_timeout);
 
 	if (err) {
 		warning("config: configure parse error (%m)\n", err);
@@ -259,6 +264,7 @@ int config_print(struct re_printf *pf, const struct config *cfg)
 			 "\n"
 			 "# Call\n"
 			 "call_local_timeout\t%u\n"
+			 "call_max_calls\t%u\n"
 			 "\n"
 			 "# Audio\n"
 			 "audio_path\t\t%s\n"
@@ -289,6 +295,7 @@ int config_print(struct re_printf *pf, const struct config *cfg)
 			 "rtcp_mux\t\t%s\n"
 			 "jitter_buffer_delay\t%H\n"
 			 "rtp_stats\t\t%s\n"
+			 "rtp_timeout\t\t%u # in seconds\n"
 			 "\n"
 			 "# Network\n"
 			 "net_interface\t\t%s\n"
@@ -303,6 +310,7 @@ int config_print(struct re_printf *pf, const struct config *cfg)
 			 cfg->sip.trans_bsize, cfg->sip.local, cfg->sip.cert,
 
 			 cfg->call.local_timeout,
+			 cfg->call.max_calls,
 
 			 cfg->audio.audio_path,
 			 cfg->audio.play_mod,  cfg->audio.play_dev,
@@ -327,6 +335,7 @@ int config_print(struct re_printf *pf, const struct config *cfg)
 			 cfg->avt.rtcp_mux ? "yes" : "no",
 			 range_print, &cfg->avt.jbuf_del,
 			 cfg->avt.rtp_stats ? "yes" : "no",
+			 cfg->avt.rtp_timeout,
 
 			 cfg->net.ifname
 
@@ -421,6 +430,7 @@ static int core_config_template(struct re_printf *pf, const struct config *cfg)
 			  "\n"
 			  "# Call\n"
 			  "call_local_timeout\t%u\n"
+			  "call_max_calls\t%u\n"
 			  "\n"
 			  "# Audio\n"
 			  "#audio_path\t\t/usr/share/baresip\n"
@@ -436,6 +446,7 @@ static int core_config_template(struct re_printf *pf, const struct config *cfg)
 			  ,
 			  poll_method_name(poll_method_best()),
 			  cfg->call.local_timeout,
+			  cfg->call.max_calls,
 			  default_audio_device(),
 			  default_audio_device(),
 			  default_audio_device(),
@@ -465,6 +476,7 @@ static int core_config_template(struct re_printf *pf, const struct config *cfg)
 			  "rtcp_mux\t\tno\n"
 			  "jitter_buffer_delay\t%u-%u\t\t# frames\n"
 			  "rtp_stats\t\tno\n"
+			  "#rtp_timeout\t\t60\n"
 			  "\n# Network\n"
 			  "#dns_server\t\t10.0.0.1:53\n"
 			  "#net_interface\t\t%H\n",
@@ -625,6 +637,7 @@ int config_write_template(const char *file, const struct config *cfg)
 	(void)re_fprintf(f, "module\t\t\t" MOD_PRE "winwave" MOD_EXT "\n");
 #else
 	(void)re_fprintf(f, "module\t\t\t" MOD_PRE "alsa" MOD_EXT "\n");
+	(void)re_fprintf(f, "#module\t\t\t" MOD_PRE "pulse" MOD_EXT "\n");
 #endif
 	(void)re_fprintf(f, "#module\t\t\t" MOD_PRE "portaudio" MOD_EXT "\n");
 	(void)re_fprintf(f, "#module\t\t\t" MOD_PRE "aubridge" MOD_EXT "\n");
@@ -641,6 +654,7 @@ int config_write_template(const char *file, const struct config *cfg)
 
 	(void)re_fprintf(f, "\n# Video filter Modules (in encoding order)\n");
 	(void)re_fprintf(f, "#module\t\t\t" MOD_PRE "selfview" MOD_EXT "\n");
+	(void)re_fprintf(f, "#module\t\t\t" MOD_PRE "vidinfo" MOD_EXT "\n");
 
 	(void)re_fprintf(f, "\n# Video source modules\n");
 #if defined (DARWIN)
@@ -700,6 +714,7 @@ int config_write_template(const char *file, const struct config *cfg)
 	(void)re_fprintf(f, "\n");
 	(void)re_fprintf(f, "module_app\t\t" MOD_PRE "auloop"MOD_EXT"\n");
 	(void)re_fprintf(f, "module_app\t\t"  MOD_PRE "contact"MOD_EXT"\n");
+	(void)re_fprintf(f, "module_app\t\t"  MOD_PRE "debug_cmd"MOD_EXT"\n");
 	(void)re_fprintf(f, "module_app\t\t"  MOD_PRE "menu"MOD_EXT"\n");
 	(void)re_fprintf(f, "#module_app\t\t"  MOD_PRE "mwi"MOD_EXT"\n");
 	(void)re_fprintf(f, "#module_app\t\t" MOD_PRE "natbd"MOD_EXT"\n");
@@ -748,6 +763,11 @@ int config_write_template(const char *file, const struct config *cfg)
 			"ice_debug\t\tno\n"
 			"ice_nomination\t\tregular\t# {regular,aggressive}\n"
 			"ice_mode\t\tfull\t# {full,lite}\n");
+
+	(void)re_fprintf(f,
+			"\n# Menu\n"
+			"#redial_attempts\t\t3 # Num or <inf>\n"
+			"#redial_delay\t\t5 # Delay in seconds\n");
 
 	if (f)
 		(void)fclose(f);

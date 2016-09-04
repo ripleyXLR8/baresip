@@ -142,12 +142,13 @@ static void menu_on_dial_contact(GtkMenuItem *menuItem, gpointer arg)
 
 static void init_contacts_menu(struct gtk_mod *mod)
 {
+	struct contacts *contacts = baresip_contacts();
 	struct le *le;
 	GtkWidget *item;
 	GtkMenuShell *contacts_menu = GTK_MENU_SHELL(mod->contacts_menu);
 
 	/* Add contacts to submenu */
-	for (le = list_head(contact_list()); le; le = le->next) {
+	for (le = list_head(contact_list(contacts)); le; le = le->next) {
 		struct contact *c = le->data;
 		item = gtk_menu_item_new_with_label(contact_str(c));
 		gtk_menu_shell_append(contacts_menu, item);
@@ -973,7 +974,7 @@ static int cmd_popup_menu(struct re_printf *pf, void *unused)
 
 
 static const struct cmd cmdv[] = {
-	{'G',        0, "Pop up GTK+ menu",         cmd_popup_menu       },
+	{"gtk", 'G',   0, "Pop up GTK+ menu",         cmd_popup_menu       },
 };
 
 
@@ -992,7 +993,7 @@ static int module_init(void)
 		return err;
 #endif
 
-	err = cmd_register(cmdv, ARRAY_SIZE(cmdv));
+	err = cmd_register(baresip_commands(), cmdv, ARRAY_SIZE(cmdv));
 	if (err)
 		return err;
 
@@ -1008,7 +1009,7 @@ static int module_init(void)
 
 static int module_close(void)
 {
-	cmd_unregister(cmdv);
+	cmd_unregister(baresip_commands(), cmdv);
 	if (mod_obj.run) {
 		gdk_threads_enter();
 		gtk_main_quit();

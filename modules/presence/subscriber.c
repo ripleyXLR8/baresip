@@ -17,6 +17,7 @@
  */
 
 
+/** Constants */
 enum {
 	SHUTDOWN_DELAY = 500  /**< Delay before un-registering [ms] */
 };
@@ -282,10 +283,11 @@ static int presence_alloc(struct contact *contact)
 
 int subscriber_init(void)
 {
+	struct contacts *contacts = baresip_contacts();
 	struct le *le;
 	int err = 0;
 
-	for (le = list_head(contact_list()); le; le = le->next) {
+	for (le = list_head(contact_list(contacts)); le; le = le->next) {
 
 		struct contact *c = le->data;
 		struct sip_addr *addr = contact_addr(c);

@@ -83,10 +83,20 @@ int dns_server_add_srv(struct dns_server *srv, const char *name,
 		       uint16_t pri, uint16_t weight, uint16_t port,
 		       const char *target);
 
+/*
+ * Mock Audio-source
+ */
+
+struct ausrc;
+
+int mock_ausrc_register(struct ausrc **ausrcp);
+
 
 /* test cases */
 
 int test_cmd(void);
+int test_cmd_long(void);
+int test_contact(void);
 int test_ua_alloc(void);
 int test_uag_find_param(void);
 int test_ua_register(void);
@@ -102,6 +112,10 @@ int test_call_reject(void);
 int test_call_af_mismatch(void);
 int test_call_answer_hangup_a(void);
 int test_call_answer_hangup_b(void);
+int test_call_rtp_timeout(void);
+int test_call_multiple(void);
+int test_call_max(void);
+int test_call_dtmf(void);
 
 
 #ifdef __cplusplus

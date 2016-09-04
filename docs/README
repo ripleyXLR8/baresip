@@ -155,6 +155,7 @@ codec2        Codec2 low bit rate speech codec
 cons          UDP/TCP console UI driver
 contact       Contacts module
 coreaudio     Apple Coreaudio driver
+debug_cmd     Debug commands
 directfb      DirectFB video display module
 dshow         Windows DirectShow video source
 dtls_srtp     DTLS-SRTP end-to-end encryption
@@ -189,8 +190,10 @@ opengles      OpenGLES video output
 opensles      OpenSLES audio driver
 opus          OPUS Interactive audio codec
 oss           Open Sound System (OSS) audio driver
+pcp           Port Control Protocol (PCP) module
 plc           Packet Loss Concealment (PLC) using spandsp
 portaudio     Portaudio driver
+pulse         Pulseaudio driver
 presence      Presence module
 qtcapture     Apple QTCapture video source driver
 quicktime     Apple Quicktime video source driver (deprecated)

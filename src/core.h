@@ -136,10 +136,16 @@ int bfcp_start(struct bfcp *bfcp);
  * Call Control
  */
 
+enum {
+	CALL_LINENUM_MIN  =   1,
+	CALL_LINENUM_MAX  = 256
+};
+
 struct call;
 
 /** Call parameters */
 struct call_prm {
+	struct sa laddr;
 	enum vidmode vidmode;
 	int af;
 };
@@ -149,6 +155,7 @@ int  call_alloc(struct call **callp, const struct config *cfg,
 		const char *local_name, const char *local_uri,
 		struct account *acc, struct ua *ua, const struct call_prm *prm,
 		const struct sip_msg *msg, struct call *xcall,
+		struct dnsc *dnsc,
 		call_event_h *eh, void *arg);
 int  call_connect(struct call *call, const struct pl *paddr);
 int  call_accept(struct call *call, struct sipsess_sock *sess_sock,
@@ -159,7 +166,7 @@ int  call_answer(struct call *call, uint16_t scode);
 int  call_sdp_get(const struct call *call, struct mbuf **descp, bool offer);
 int  call_jbuf_stat(struct re_printf *pf, const struct call *call);
 int  call_info(struct re_printf *pf, const struct call *call);
-int  call_reset_transp(struct call *call);
+int  call_reset_transp(struct call *call, const struct sa *laddr);
 int  call_notify_sipfrag(struct call *call, uint16_t scode,
 			 const char *reason, ...);
 int  call_af(const struct call *call);
@@ -281,6 +288,9 @@ typedef void (stream_rtp_h)(const struct rtp_header *hdr, struct mbuf *mb,
 			    void *arg);
 typedef void (stream_rtcp_h)(struct rtcp_msg *msg, void *arg);
 
+typedef void (stream_error_h)(struct stream *strm, int err, void *arg);
+
+
 /** Defines a generic media stream */
 struct stream {
 	struct le le;            /**< Linked list element                   */
@@ -307,6 +317,12 @@ struct stream {
 	stream_rtp_h *rtph;      /**< Stream RTP handler                    */
 	stream_rtcp_h *rtcph;    /**< Stream RTCP handler                   */
 	void *arg;               /**< Handler argument                      */
+	stream_error_h *errorh;  /**< Stream error handler                  */
+	void *errorh_arg;        /**< Error handler argument                */
+	struct tmr tmr_rtp;      /**< Timer for detecting RTP timeout       */
+	uint64_t ts_last;        /**< Timestamp of last received RTP pkt    */
+	bool terminated;         /**< Stream is terminated flag             */
+	uint32_t rtp_timeout_ms; /**< RTP Timeout value in [ms]             */
 };
 
 int  stream_alloc(struct stream **sp, const struct config_avt *cfg,
@@ -327,8 +343,11 @@ void stream_set_srate(struct stream *s, uint32_t srate_tx, uint32_t srate_rx);
 void stream_send_fir(struct stream *s, bool pli);
 void stream_reset(struct stream *s);
 void stream_set_bw(struct stream *s, uint32_t bps);
+void stream_set_error_handler(struct stream *strm,
+			      stream_error_h *errorh, void *arg);
 int  stream_debug(struct re_printf *pf, const struct stream *s);
 int  stream_print(struct re_printf *pf, const struct stream *s);
+void stream_enable_rtp_timeout(struct stream *strm, uint32_t timeout_ms);
 
 
 /*

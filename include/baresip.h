@@ -13,7 +13,7 @@ extern "C" {
 
 
 /** Defines the Baresip version string */
-#define BARESIP_VERSION "0.4.19"
+#define BARESIP_VERSION "0.4.20"
 
 
 #ifndef NET_MAX_NS
@@ -100,6 +100,10 @@ struct list  *call_streaml(const struct call *call);
 struct ua    *call_get_ua(const struct call *call);
 bool          call_is_onhold(const struct call *call);
 bool          call_is_outgoing(const struct call *call);
+void          call_enable_rtp_timeout(struct call *call, uint32_t timeout_ms);
+uint32_t      call_linenum(const struct call *call);
+struct call  *call_find_linenum(const struct list *calls, uint32_t linenum);
+void call_set_current(struct list *calls, struct call *call);
 
 
 /*
@@ -108,13 +112,13 @@ bool          call_is_outgoing(const struct call *call);
 
 
 /** Defines the configuration line handler */
-typedef int (confline_h)(const struct pl *addr);
+typedef int (confline_h)(const struct pl *addr, void *arg);
 
 int  conf_configure(void);
 int  conf_modules(void);
 void conf_path_set(const char *path);
 int  conf_path_get(char *path, size_t sz);
-int  conf_parse(const char *filename, confline_h *ch);
+int  conf_parse(const char *filename, confline_h *ch, void *arg);
 int  conf_get_vidsz(const struct conf *conf, const char *name,
 		    struct vidsz *sz);
 int  conf_get_sa(const struct conf *conf, const char *name, struct sa *sa);
@@ -158,6 +162,7 @@ struct config_sip {
 /** Call config */
 struct config_call {
 	uint32_t local_timeout; /**< Incoming call timeout [sec] 0=off */
+	uint32_t max_calls;     /**< Maximum number of calls, 0=unlimited */
 };
 
 /** Audio */
@@ -201,6 +206,7 @@ struct config_avt {
 	bool rtcp_mux;          /**< RTP/RTCP multiplexing          */
 	struct range jbuf_del;  /**< Delay, number of frames        */
 	bool rtp_stats;         /**< Enable RTP statistics          */
+	uint32_t rtp_timeout;   /**< RTP Timeout in seconds (0=off) */
 };
 
 /* Network */
@@ -258,17 +264,24 @@ enum presence_status {
 	PRESENCE_BUSY
 };
 
+struct contacts {
+	struct list cl;
+	struct hash *cht;
+};
+
 struct contact;
 
-int  contact_init(void);
-void contact_close(void);
-int  contact_add(struct contact **contactp, const struct pl *addr);
-int  contacts_print(struct re_printf *pf, void *unused);
+int  contact_init(struct contacts *contacts);
+void contact_close(struct contacts *contacts);
+int  contact_add(struct contacts *contacts,
+		 struct contact **contactp, const struct pl *addr);
+int  contacts_print(struct re_printf *pf, const struct contacts *contacts);
 void contact_set_presence(struct contact *c, enum presence_status status);
-bool contact_block_access(const char *uri);
-struct contact  *contact_find(const char *uri);
+bool contact_block_access(const struct contacts *contacts, const char *uri);
+struct contact  *contact_find(const struct contacts *contacts,
+			      const char *uri);
 struct sip_addr *contact_addr(const struct contact *c);
-struct list     *contact_list(void);
+struct list     *contact_list(const struct contacts *contacts);
 const char      *contact_str(const struct contact *c);
 const char      *contact_presence_str(enum presence_status status);
 
@@ -491,13 +504,15 @@ struct dnsc     *net_dnsc(const struct network *net);
  */
 
 struct play;
+struct player;
 
-int  play_file(struct play **playp, const char *filename, int repeat);
-int  play_tone(struct play **playp, struct mbuf *tone,
+int  play_file(struct play **playp, struct player *player,
+	       const char *filename, int repeat);
+int  play_tone(struct play **playp, struct player *player,
+	       struct mbuf *tone,
 	       uint32_t srate, uint8_t ch, int repeat);
-void play_init(void);
-void play_close(void);
-void play_set_path(const char *path);
+int  play_init(struct player **playerp);
+void play_set_path(struct player *player, const char *path);
 
 
 /*
@@ -628,6 +643,12 @@ int  ui_password_prompt(char **passwordp);
  * Command interface
  */
 
+/* special keys */
+#define KEYCODE_NONE   (0x00)
+#define KEYCODE_REL    (0x04)    /* Key was released */
+#define KEYCODE_ESC    (0x1b)
+
+
 /** Command flags */
 enum {
 	CMD_PRM  = (1<<0),              /**< Command with parameter */
@@ -641,11 +662,13 @@ struct cmd_arg {
 	char key;         /**< Which key was pressed  */
 	char *prm;        /**< Optional parameter     */
 	bool complete;    /**< True if complete       */
+	void *data;       /**< Application data       */
 };
 
 /** Defines a command */
 struct cmd {
-	char key;         /**< Input character        */
+	const char *name; /**< Long command           */
+	char key;         /**< Short command          */
 	int flags;        /**< Optional command flags */
 	const char *desc; /**< Description string     */
 	re_printf_h *h;   /**< Command handler        */
@@ -653,10 +676,23 @@ struct cmd {
 
 struct cmd_ctx;
 
-int  cmd_register(const struct cmd *cmdv, size_t cmdc);
-void cmd_unregister(const struct cmd *cmdv);
-int  cmd_process(struct cmd_ctx **ctxp, char key, struct re_printf *pf);
-int  cmd_print(struct re_printf *pf, void *unused);
+struct commands {
+	struct list cmdl;        /**< List of command blocks (struct cmds) */
+};
+
+
+int  cmd_init(struct commands *commands);
+void cmd_close(struct commands *commands);
+int  cmd_register(struct commands *commands,
+		  const struct cmd *cmdv, size_t cmdc);
+void cmd_unregister(struct commands *commands, const struct cmd *cmdv);
+int  cmd_process(struct commands *commands, struct cmd_ctx **ctxp, char key,
+		 struct re_printf *pf, void *data);
+int  cmd_process_long(struct commands *commands, const char *str, size_t len,
+		      struct re_printf *pf_resp, void *data);
+int cmd_print(struct re_printf *pf, const struct commands *commands);
+const struct cmd *cmd_find_long(const struct commands *commands,
+				const char *name);
 
 
 /*
@@ -809,7 +845,8 @@ typedef int (videnc_encode_h)(struct videnc_state *ves, bool update,
 typedef int (viddec_update_h)(struct viddec_state **vdsp,
 			      const struct vidcodec *vc, const char *fmtp);
 typedef int (viddec_decode_h)(struct viddec_state *vds, struct vidframe *frame,
-			      bool marker, uint16_t seq, struct mbuf *mb);
+                              bool *intra, bool marker, uint16_t seq,
+                              struct mbuf *mb);
 
 struct vidcodec {
 	struct le le;
@@ -1070,6 +1107,9 @@ double mos_calculate(double *r_factor, double rtt,
 int  baresip_init(struct config *cfg, bool prefer_ipv6);
 void baresip_close(void);
 struct network *baresip_network(void);
+struct contacts *baresip_contacts(void);
+struct commands *baresip_commands(void);
+struct player *baresip_player(void);
 
 
 #ifdef __cplusplus

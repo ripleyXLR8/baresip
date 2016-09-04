@@ -3,6 +3,7 @@
  *
  * Copyright (C) 2010 Creytiv.com
  */
+#include <stdlib.h>
 #include <time.h>
 #include <re.h>
 #include <baresip.h>
@@ -26,7 +27,6 @@ enum statmode {
 
 
 static uint64_t start_ticks;          /**< Ticks when app started         */
-static time_t start_time;             /**< Start time of application      */
 static struct tmr tmr_alert;          /**< Incoming call alert timer      */
 static struct tmr tmr_stat;           /**< Call status timer              */
 static enum statmode statmode;        /**< Status mode                    */
@@ -36,12 +36,24 @@ static struct le *le_cur;             /**< Current User-Agent (struct ua) */
 static struct {
 	struct play *play;
 	bool bell;
+
+	struct tmr tmr_redial;        /**< Timer for auto-reconnect       */
+	uint32_t redial_delay;        /**< Redial delay in [seconds]      */
+	uint32_t redial_attempts;     /**< Number of re-dial attempts     */
+	uint32_t current_attempts;    /**< Current number of re-dials     */
 } menu;
 
 
 static void menu_set_incall(bool incall);
 static void update_callstatus(void);
 static void alert_stop(void);
+
+
+static void redial_reset(void)
+{
+	tmr_cancel(&menu.tmr_redial);
+	menu.current_attempts = 0;
+}
 
 
 static const char *translate_errorcode(uint16_t scode)
@@ -109,34 +121,6 @@ static bool have_active_calls(void)
 	}
 
 	return false;
-}
-
-
-static int print_system_info(struct re_printf *pf, void *arg)
-{
-	uint32_t uptime;
-	int err = 0;
-
-	(void)arg;
-
-	uptime = (uint32_t)((long long)(tmr_jiffies() - start_ticks)/1000);
-
-	err |= re_hprintf(pf, "\n--- System info: ---\n");
-
-	err |= re_hprintf(pf, " Machine:  %s/%s\n", sys_arch_get(),
-			  sys_os_get());
-	err |= re_hprintf(pf, " Version:  %s (libre v%s)\n",
-			  BARESIP_VERSION, sys_libre_version_get());
-	err |= re_hprintf(pf, " Build:    %H\n", sys_build_get, NULL);
-	err |= re_hprintf(pf, " Kernel:   %H\n", sys_kernel_get, NULL);
-	err |= re_hprintf(pf, " Uptime:   %H\n", fmt_human_time, &uptime);
-	err |= re_hprintf(pf, " Started:  %s", ctime(&start_time));
-
-#ifdef __VERSION__
-	err |= re_hprintf(pf, " Compiler: %s\n", __VERSION__);
-#endif
-
-	return err;
 }
 
 
@@ -408,10 +392,10 @@ static int cmd_ua_next(struct re_printf *pf, void *unused)
 }
 
 
-static int cmd_ua_debug(struct re_printf *pf, void *unused)
+static int print_commands(struct re_printf *pf, void *unused)
 {
 	(void)unused;
-	return ua_debug(pf, uag_cur());
+	return cmd_print(pf, baresip_commands());
 }
 
 
@@ -422,55 +406,35 @@ static int cmd_print_calls(struct re_printf *pf, void *unused)
 }
 
 
-static int cmd_config_print(struct re_printf *pf, void *unused)
-{
-	(void)unused;
-	return config_print(pf, conf_config());
-}
-
-
-static int cmd_net_debug(struct re_printf *pf, void *unused)
-{
-	(void)unused;
-	return net_debug(pf, baresip_network());
-}
-
-
 static const struct cmd cmdv[] = {
-	{'M',       0, "Main loop debug",          re_debug             },
-	{'\n',      0, "Accept incoming call",     cmd_answer           },
-	{'D',       0, "Accept incoming call",     cmd_answer           },
-	{'b',       0, "Hangup call",              cmd_hangup           },
-	{'c',       0, "Call status",              ua_print_call_status },
-	{'d', CMD_PRM, "Dial",                     dial_handler         },
-	{'h',       0, "Help menu",                cmd_print            },
-	{'i',       0, "SIP debug",                ua_print_sip_status  },
-	{'l',       0, "List active calls",        cmd_print_calls      },
-	{'m',       0, "Module debug",             mod_debug            },
-	{'n',       0, "Network debug",            cmd_net_debug        },
-	{'o', CMD_PRM, "Options",                  options_command      },
-	{'r',       0, "Registration info",        ua_print_reg_status  },
-	{'s',       0, "System info",              print_system_info    },
-	{'t',       0, "Timer debug",              tmr_status           },
-	{'u',       0, "UA debug",                 cmd_ua_debug         },
-	{'y',       0, "Memory status",            mem_status           },
-	{0x1b,      0, "Hangup call",              cmd_hangup           },
-	{' ',       0, "Toggle UAs",               cmd_ua_next          },
-	{'T',       0, "Toggle UAs",               cmd_ua_next          },
-	{'g',       0, "Print configuration",      cmd_config_print     },
-	{'R', CMD_PRM, "Create User-Agent",        create_ua            },
-	{'#', CMD_PRM, NULL,   dial_handler },
-	{'*', CMD_PRM, NULL,   dial_handler },
-	{'0', CMD_PRM, NULL,   dial_handler },
-	{'1', CMD_PRM, NULL,   dial_handler },
-	{'2', CMD_PRM, NULL,   dial_handler },
-	{'3', CMD_PRM, NULL,   dial_handler },
-	{'4', CMD_PRM, NULL,   dial_handler },
-	{'5', CMD_PRM, NULL,   dial_handler },
-	{'6', CMD_PRM, NULL,   dial_handler },
-	{'7', CMD_PRM, NULL,   dial_handler },
-	{'8', CMD_PRM, NULL,   dial_handler },
-	{'9', CMD_PRM, NULL,   dial_handler },
+
+{NULL,        '\n',       0, "Accept incoming call",    cmd_answer           },
+{"accept",    'D',        0, "Accept incoming call",    cmd_answer           },
+{"hangup",    'b',        0, "Hangup call",             cmd_hangup           },
+{"callstat",  'c',        0, "Call status",             ua_print_call_status },
+{"dial",      'd',  CMD_PRM, "Dial",                    dial_handler         },
+{"help",      'h',        0, "Help menu",               print_commands       },
+{"listcalls", 'l',        0, "List active calls",       cmd_print_calls      },
+{"options",   'o',  CMD_PRM, "Options",                 options_command      },
+{"reginfo",   'r',        0, "Registration info",       ua_print_reg_status  },
+{NULL,        KEYCODE_ESC,0, "Hangup call",             cmd_hangup           },
+{NULL,        ' ',        0, "Toggle UAs",              cmd_ua_next          },
+{NULL,        'T',        0, "Toggle UAs",              cmd_ua_next          },
+{NULL,        'R',  CMD_PRM, "Create User-Agent",       create_ua            },
+
+/* Numeric keypad inputs: */
+{NULL, '#', CMD_PRM, NULL,   dial_handler },
+{NULL, '*', CMD_PRM, NULL,   dial_handler },
+{NULL, '0', CMD_PRM, NULL,   dial_handler },
+{NULL, '1', CMD_PRM, NULL,   dial_handler },
+{NULL, '2', CMD_PRM, NULL,   dial_handler },
+{NULL, '3', CMD_PRM, NULL,   dial_handler },
+{NULL, '4', CMD_PRM, NULL,   dial_handler },
+{NULL, '5', CMD_PRM, NULL,   dial_handler },
+{NULL, '6', CMD_PRM, NULL,   dial_handler },
+{NULL, '7', CMD_PRM, NULL,   dial_handler },
+{NULL, '8', CMD_PRM, NULL,   dial_handler },
+{NULL, '9', CMD_PRM, NULL,   dial_handler },
 };
 
 
@@ -533,12 +497,21 @@ static int call_xfer(struct re_printf *pf, void *arg)
 }
 
 
-static int call_holdresume(struct re_printf *pf, void *arg)
+static int cmd_call_hold(struct re_printf *pf, void *arg)
 {
-	const struct cmd_arg *carg = arg;
 	(void)pf;
+	(void)arg;
 
-	return call_hold(ua_call(uag_cur()), 'x' == carg->key);
+	return call_hold(ua_call(uag_cur()), true);
+}
+
+
+static int cmd_call_resume(struct re_printf *pf, void *arg)
+{
+	(void)pf;
+	(void)arg;
+
+	return call_hold(ua_call(uag_cur()), false);
 }
 
 
@@ -687,49 +660,74 @@ static int toggle_statmode(struct re_printf *pf, void *arg)
 }
 
 
+static int set_current_call(struct re_printf *pf, void *arg)
+{
+	struct cmd_arg *carg = arg;
+	struct call *call;
+	uint32_t linenum = atoi(carg->prm);
+	int err;
+
+	call = call_find_linenum(ua_calls(uag_cur()), linenum);
+	if (call) {
+		err = re_hprintf(pf, "setting current call: line %u\n",
+				 linenum);
+		call_set_current(ua_calls(uag_cur()), call);
+	}
+	else {
+		err = re_hprintf(pf, "call not found\n");
+	}
+
+	return err;
+}
+
+
 static const struct cmd callcmdv[] = {
-	{'I',       0, "Send re-INVITE",      call_reinvite         },
-	{'X',       0, "Call resume",         call_holdresume       },
-	{'a',       0, "Audio stream",        call_audio_debug      },
-	{'e',       0, "Cycle audio encoder", call_audioenc_cycle   },
-	{'m',       0, "Call mute/un-mute",   call_mute             },
-	{'r', CMD_IPRM,"Transfer call",       call_xfer             },
-	{'x',       0, "Call hold",           call_holdresume       },
-	{'H',       0, "Hold previous call",  hold_prev_call        },
-	{'L',       0, "Resume previous call",hold_prev_call        },
-	{'A', CMD_IPRM,"Switch audio device", switch_audio_dev      },
+{"",          'I',        0, "Send re-INVITE",      call_reinvite         },
+{"resume",    'X',        0, "Call resume",         cmd_call_resume       },
+{"",          'a',        0, "Audio stream",        call_audio_debug      },
+{"",          'e',        0, "Cycle audio encoder", call_audioenc_cycle   },
+{"mute",      'm',        0, "Call mute/un-mute",   call_mute             },
+{"transfer",  'r', CMD_IPRM, "Transfer call",       call_xfer             },
+{"hold",      'x',        0, "Call hold",           cmd_call_hold         },
+{"",          'H',        0, "Hold previous call",  hold_prev_call        },
+{"",          'L',        0, "Resume previous call",hold_prev_call        },
+{"",          'A', CMD_IPRM, "Switch audio device", switch_audio_dev      },
 
 #ifdef USE_VIDEO
-	{'E',       0, "Cycle video encoder", call_videoenc_cycle   },
-	{'v',       0, "Video stream",        call_video_debug      },
+{"", 'E',       0, "Cycle video encoder", call_videoenc_cycle   },
+{"", 'v',       0, "Video stream",        call_video_debug      },
 #endif
 
-	{'#',       0, NULL,                  digit_handler         },
-	{'*',       0, NULL,                  digit_handler         },
-	{'0',       0, NULL,                  digit_handler         },
-	{'1',       0, NULL,                  digit_handler         },
-	{'2',       0, NULL,                  digit_handler         },
-	{'3',       0, NULL,                  digit_handler         },
-	{'4',       0, NULL,                  digit_handler         },
-	{'5',       0, NULL,                  digit_handler         },
-	{'6',       0, NULL,                  digit_handler         },
-	{'7',       0, NULL,                  digit_handler         },
-	{'8',       0, NULL,                  digit_handler         },
-	{'9',       0, NULL,                  digit_handler         },
-	{0x00,      0, NULL,                  digit_handler         },
+/* Numeric keypad for DTMF events: */
+{NULL, '#',         0, NULL,                  digit_handler         },
+{NULL, '*',         0, NULL,                  digit_handler         },
+{NULL, '0',         0, NULL,                  digit_handler         },
+{NULL, '1',         0, NULL,                  digit_handler         },
+{NULL, '2',         0, NULL,                  digit_handler         },
+{NULL, '3',         0, NULL,                  digit_handler         },
+{NULL, '4',         0, NULL,                  digit_handler         },
+{NULL, '5',         0, NULL,                  digit_handler         },
+{NULL, '6',         0, NULL,                  digit_handler         },
+{NULL, '7',         0, NULL,                  digit_handler         },
+{NULL, '8',         0, NULL,                  digit_handler         },
+{NULL, '9',         0, NULL,                  digit_handler         },
+{NULL, KEYCODE_REL, 0, NULL,                  digit_handler         },
 
-	{'S',       0, "Statusmode toggle",   toggle_statmode       },
+{NULL, 'S',        0, "Statusmode toggle",       toggle_statmode    },
+{NULL, '@',  CMD_PRM, "Set current call <line>", set_current_call   },
 };
 
 
 static void menu_set_incall(bool incall)
 {
+	struct commands *commands = baresip_commands();
+
 	/* Dynamic menus */
 	if (incall) {
-		(void)cmd_register(callcmdv, ARRAY_SIZE(callcmdv));
+		(void)cmd_register(commands, callcmdv, ARRAY_SIZE(callcmdv));
 	}
 	else {
-		cmd_unregister(callcmdv);
+		cmd_unregister(commands, callcmdv);
 	}
 }
 
@@ -790,9 +788,47 @@ static void alert_stop(void)
 }
 
 
+static void redial_handler(void *arg)
+{
+	char *uri = NULL;
+	int err;
+	(void)arg;
+
+	info("now: redialing now. current_attempts=%u, max_attempts=%u\n",
+	     menu.current_attempts,
+	     menu.redial_attempts);
+
+	if (menu.current_attempts > menu.redial_attempts) {
+
+		info("menu: redial: too many attemptes -- giving up\n");
+		return;
+	}
+
+	if (dialbuf->end == 0) {
+		warning("menu: redial: dialbuf is empty\n");
+		return;
+	}
+
+	dialbuf->pos = 0;
+	err = mbuf_strdup(dialbuf, &uri, dialbuf->end);
+	if (err)
+		return;
+
+	err = ua_connect(uag_cur(), NULL, NULL, uri, NULL, VIDMODE_ON);
+	if (err) {
+		warning("menu: redial: ua_connect failed (%m)\n", err);
+	}
+
+	mem_deref(uri);
+
+}
+
+
 static void ua_event_handler(struct ua *ua, enum ua_event ev,
 			     struct call *call, const char *prm, void *arg)
 {
+	struct player *player = baresip_player();
+
 	(void)call;
 	(void)prm;
 	(void)arg;
@@ -817,12 +853,13 @@ static void ua_event_handler(struct ua *ua, enum ua_event ev,
 		if (ANSWERMODE_MANUAL == account_answermode(ua_account(ua))) {
 
 			if (list_count(ua_calls(ua)) > 1) {
-				(void)play_file(&menu.play,
+				(void)play_file(&menu.play, player,
 						"callwaiting.wav", 3);
 			}
 			else {
 				/* Alert user */
-				(void)play_file(&menu.play, "ring.wav", -1);
+				(void)play_file(&menu.play, player,
+						"ring.wav", -1);
 			}
 
 			if (menu.bell)
@@ -834,7 +871,7 @@ static void ua_event_handler(struct ua *ua, enum ua_event ev,
 		/* stop any ringtones */
 		menu.play = mem_deref(menu.play);
 
-		(void)play_file(&menu.play, "ringback.wav", -1);
+		(void)play_file(&menu.play, player, "ringback.wav", -1);
 		break;
 
 	case UA_EVENT_CALL_ESTABLISHED:
@@ -842,6 +879,10 @@ static void ua_event_handler(struct ua *ua, enum ua_event ev,
 		menu.play = mem_deref(menu.play);
 
 		alert_stop();
+
+		/* We must stop the re-dialing if the call was
+		   established */
+		redial_reset();
 		break;
 
 	case UA_EVENT_CALL_CLOSED:
@@ -851,11 +892,42 @@ static void ua_event_handler(struct ua *ua, enum ua_event ev,
 		if (call_scode(call)) {
 			const char *tone;
 			tone = translate_errorcode(call_scode(call));
-			if (tone)
-				(void)play_file(&menu.play, tone, 1);
+			if (tone) {
+				(void)play_file(&menu.play, player,
+						tone, 1);
+			}
 		}
 
 		alert_stop();
+
+		/* Activate the re-dialing if:
+		 *
+		 * - redial_attempts must be enabled in config
+		 * - the closed call must be of outgoing direction
+		 * - the closed call must fail with special code 701
+		 */
+		if (menu.redial_attempts) {
+
+			if (menu.current_attempts
+			    ||
+			    (call_is_outgoing(call) &&
+			     call_scode(call) == 701)) {
+
+				info("menu: call closed"
+				     " -- redialing in %u seconds\n",
+				     menu.redial_delay);
+
+				++menu.current_attempts;
+
+				tmr_start(&menu.tmr_redial,
+					  menu.redial_delay*1000,
+					  redial_handler, NULL);
+			}
+			else {
+				info("menu: call closed -- not redialing\n");
+			}
+		}
+
 		break;
 
 	case UA_EVENT_REGISTER_OK:
@@ -883,26 +955,46 @@ static void message_handler(const struct pl *peer, const struct pl *ctype,
 	(void)re_fprintf(stderr, "\r%r: \"%b\"\n", peer,
 			 mbuf_buf(body), mbuf_get_left(body));
 
-	(void)play_file(NULL, "message.wav", 0);
+	(void)play_file(NULL, baresip_player(), "message.wav", 0);
 }
 
 
 static int module_init(void)
 {
+	struct pl val;
 	int err;
 
+	/*
+	 * Read the config values
+	 */
 	conf_get_bool(conf_cur(), "menu_bell", &menu.bell);
+
+	if (0 == conf_get(conf_cur(), "redial_attempts", &val) &&
+	    0 == pl_strcasecmp(&val, "inf")) {
+		menu.redial_attempts = (uint32_t)-1;
+	}
+	else {
+		conf_get_u32(conf_cur(), "redial_attempts",
+			     &menu.redial_attempts);
+	}
+	conf_get_u32(conf_cur(), "redial_delay", &menu.redial_delay);
+
+	if (menu.redial_attempts) {
+		info("menu: redial enabled with %u attempts and"
+		     " %u seconds delay\n",
+		     menu.redial_attempts,
+		     menu.redial_delay);
+	}
 
 	dialbuf = mbuf_alloc(64);
 	if (!dialbuf)
 		return ENOMEM;
 
 	start_ticks = tmr_jiffies();
-	(void)time(&start_time);
 	tmr_init(&tmr_alert);
 	statmode = STATMODE_CALL;
 
-	err  = cmd_register(cmdv, ARRAY_SIZE(cmdv));
+	err  = cmd_register(baresip_commands(), cmdv, ARRAY_SIZE(cmdv));
 	err |= uag_event_register(ua_event_handler, NULL);
 
 	err |= message_init(message_handler, NULL);
@@ -913,9 +1005,12 @@ static int module_init(void)
 
 static int module_close(void)
 {
+	debug("menu: close (redial current_attempts=%d)\n",
+	      menu.current_attempts);
+
 	message_close();
 	uag_event_unregister(ua_event_handler);
-	cmd_unregister(cmdv);
+	cmd_unregister(baresip_commands(), cmdv);
 
 	menu_set_incall(false);
 	tmr_cancel(&tmr_alert);
@@ -925,6 +1020,8 @@ static int module_close(void)
 	le_cur = NULL;
 
 	menu.play = mem_deref(menu.play);
+
+	tmr_cancel(&menu.tmr_redial);
 
 	return 0;
 }

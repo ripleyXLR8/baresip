@@ -9,6 +9,7 @@
 # Test-cases:
 #
 TEST_SRCS	+= cmd.c
+TEST_SRCS	+= contact.c
 TEST_SRCS	+= ua.c
 TEST_SRCS	+= cplusplus.c
 TEST_SRCS	+= call.c
@@ -31,6 +32,8 @@ TEST_SRCS	+= sip/user.c
 ifneq ($(USE_TLS),)
 TEST_SRCS	+= mock/cert.c
 endif
+
+TEST_SRCS	+= mock/mock_ausrc.c
 
 
 TEST_SRCS	+= test.c

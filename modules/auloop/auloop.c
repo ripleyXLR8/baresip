@@ -361,8 +361,8 @@ static int auloop_stop(struct re_printf *pf, void *arg)
 
 
 static const struct cmd cmdv[] = {
-	{'a', 0, "Start audio-loop", auloop_start },
-	{'A', 0, "Stop audio-loop",  auloop_stop  },
+	{"auloop",      'a', 0, "Start audio-loop", auloop_start },
+	{"auloop_stop", 'A', 0, "Stop audio-loop",  auloop_stop  },
 };
 
 
@@ -370,14 +370,14 @@ static int module_init(void)
 {
 	conf_get_str(conf_cur(), "auloop_codec", aucodec, sizeof(aucodec));
 
-	return cmd_register(cmdv, ARRAY_SIZE(cmdv));
+	return cmd_register(baresip_commands(), cmdv, ARRAY_SIZE(cmdv));
 }
 
 
 static int module_close(void)
 {
 	auloop_stop(NULL, NULL);
-	cmd_unregister(cmdv);
+	cmd_unregister(baresip_commands(), cmdv);
 	return 0;
 }
 

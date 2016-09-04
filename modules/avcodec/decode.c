@@ -153,7 +153,32 @@ static int ffdecode(struct viddec_state *st, struct vidframe *frame,
 		goto out;
 	}
 
-#if LIBAVCODEC_VERSION_INT <= ((52<<16)+(23<<8)+0)
+#if LIBAVCODEC_VERSION_INT >= ((57<<16)+(37<<8)+100)
+
+	do {
+		AVPacket avpkt;
+
+		av_init_packet(&avpkt);
+		avpkt.data = st->mb->buf;
+		avpkt.size = (int)mbuf_get_left(st->mb);
+
+		ret = avcodec_send_packet(st->ctx, &avpkt);
+		if (ret < 0) {
+			err = EBADMSG;
+			goto out;
+		}
+
+		ret = avcodec_receive_frame(st->ctx, st->pict);
+		if (ret < 0) {
+			err = EBADMSG;
+			goto out;
+		}
+
+		got_picture = true;
+
+	} while (0);
+
+#elif LIBAVCODEC_VERSION_INT <= ((52<<16)+(23<<8)+0)
 	ret = avcodec_decode_video(st->ctx, st->pict, &got_picture,
 				   st->mb->buf,
 				   (int)mbuf_get_left(st->mb));
@@ -214,11 +239,13 @@ static int ffdecode(struct viddec_state *st, struct vidframe *frame,
 }
 
 
-int h264_decode(struct viddec_state *st, struct mbuf *src)
+static int h264_decode(struct viddec_state *st, bool *intra, struct mbuf *src)
 {
 	struct h264_hdr h264_hdr;
 	const uint8_t nal_seq[3] = {0, 0, 1};
 	int err;
+
+	*intra = false;
 
 	err = h264_hdr_decode(&h264_hdr, src);
 	if (err)
@@ -242,6 +269,9 @@ int h264_decode(struct viddec_state *st, struct mbuf *src)
 			}
 		}
 
+		if (h264_is_keyframe(h264_hdr.type))
+			*intra = true;
+
 		/* prepend H.264 NAL start sequence */
 		mbuf_write_mem(st->mb, nal_seq, 3);
 
@@ -257,6 +287,9 @@ int h264_decode(struct viddec_state *st, struct mbuf *src)
 		h264_hdr.type = fu.type;
 
 		if (fu.s) {
+			if (h264_is_keyframe(fu.type))
+				*intra = true;
+
 			/* prepend H.264 NAL start sequence */
 			mbuf_write_mem(st->mb, nal_seq, 3);
 
@@ -274,7 +307,7 @@ int h264_decode(struct viddec_state *st, struct mbuf *src)
 
 
 int decode_h264(struct viddec_state *st, struct vidframe *frame,
-		bool eof, uint16_t seq, struct mbuf *src)
+		bool *intra, bool eof, uint16_t seq, struct mbuf *src)
 {
 	int err;
 
@@ -283,7 +316,7 @@ int decode_h264(struct viddec_state *st, struct vidframe *frame,
 	if (!src)
 		return 0;
 
-	err = h264_decode(st, src);
+	err = h264_decode(st, intra, src);
 	if (err)
 		return err;
 
@@ -292,12 +325,14 @@ int decode_h264(struct viddec_state *st, struct vidframe *frame,
 
 
 int decode_mpeg4(struct viddec_state *st, struct vidframe *frame,
-		 bool eof, uint16_t seq, struct mbuf *src)
+		 bool *intra, bool eof, uint16_t seq, struct mbuf *src)
 {
 	if (!src)
 		return 0;
 
 	(void)seq;
+
+	*intra = false;  /* XXX */
 
 	/* let the decoder handle this */
 	st->got_keyframe = true;
@@ -307,13 +342,15 @@ int decode_mpeg4(struct viddec_state *st, struct vidframe *frame,
 
 
 int decode_h263(struct viddec_state *st, struct vidframe *frame,
-		bool marker, uint16_t seq, struct mbuf *src)
+		bool *intra, bool marker, uint16_t seq, struct mbuf *src)
 {
 	struct h263_hdr hdr;
 	int err;
 
-	if (!st || !frame)
+	if (!st || !frame || !intra)
 		return EINVAL;
+
+	*intra = false;
 
 	if (!src)
 		return 0;
@@ -334,8 +371,11 @@ int decode_h263(struct viddec_state *st, struct vidframe *frame,
 	      mbuf_get_left(src), st->mb->end);
 #endif
 
-	if (!hdr.i)
+	if (!hdr.i) {
 		st->got_keyframe = true;
+		if (st->mb->pos == 0)
+			*intra = true;
+	}
 
 #if 0
 	if (st->mb->pos == 0) {

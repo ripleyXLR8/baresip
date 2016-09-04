@@ -641,7 +641,33 @@ int encode(struct videnc_state *st, bool update, const struct vidframe *frame)
 
 	mbuf_rewind(st->mb);
 
-#if LIBAVCODEC_VERSION_INT >= ((54<<16)+(1<<8)+0)
+#if LIBAVCODEC_VERSION_INT >= ((57<<16)+(37<<8)+100)
+	do {
+		AVPacket *pkt;
+
+		ret = avcodec_send_frame(st->ctx, st->pict);
+		if (ret < 0)
+			return EBADMSG;
+
+		pkt = av_packet_alloc();
+		if (!pkt)
+			return ENOMEM;
+
+		ret = avcodec_receive_packet(st->ctx, pkt);
+		if (ret < 0) {
+			av_packet_free(&pkt);
+			return 0;
+		}
+
+		err = mbuf_write_mem(st->mb, pkt->data, pkt->size);
+		st->mb->pos = 0;
+
+		av_packet_free(&pkt);
+
+		if (err)
+			return err;
+	} while (0);
+#elif LIBAVCODEC_VERSION_INT >= ((54<<16)+(1<<8)+0)
 	do {
 		AVPacket avpkt;
 		int got_packet;
