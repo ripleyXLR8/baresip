@@ -3,6 +3,7 @@
  *
  * Copyright (C) 2010 - 2016 Creytiv.com
  */
+#include <assert.h>
 #include <re.h>
 #include <baresip.h>
 #include "core.h"
@@ -26,6 +27,185 @@ struct network {
 	net_change_h *ch;
 	void *arg;
 };
+
+
+/*
+      Prefix        Precedence Label
+      ::1/128               50     0
+      ::/0                  40     1
+      ::ffff:0:0/96         35     4
+      2002::/16             30     2
+      2001::/32              5     5
+      fc00::/7               3    13
+      ::/96                  1     3
+      fec0::/10              1    11
+      3ffe::/16              1    12
+
+ * NOTE: The table is sorted by prefix_length in order to have fast lookup
+ */
+static const struct policy {
+	uint32_t addr[4];     /* host-order */
+	unsigned prefix_len;
+	unsigned precedence;
+	unsigned label;
+} policy_table[] = {
+
+{ {0x00000000, 0x00000000, 0x00000000, 0x00000001}, 128,  50,  0 },
+{ {0x00000000, 0x00000000, 0x0000ffff, 0x00000000},  96,  35,  4 },
+{ {0x00000000, 0x00000000, 0x00000000, 0x00000000},  96,   1,  3 },
+{ {0x20010000, 0x00000000, 0x00000000, 0x00000000},  32,   5,  5 },
+{ {0x20020000, 0x00000000, 0x00000000, 0x00000000},  16,  30,  2 },
+{ {0x3ffe0000, 0x00000000, 0x00000000, 0x00000000},  16,   1, 12 },
+{ {0xfec00000, 0x00000000, 0x00000000, 0x00000000},  10,   1, 11 },
+{ {0xfc000000, 0x00000000, 0x00000000, 0x00000000},   7,   3, 13 },
+{ {0x00000000, 0x00000000, 0x00000000, 0x00000000},   0,  40,  1 },
+
+};
+
+
+static bool sa_cmp_prefix(const uint32_t *la, const struct sa *r,
+			  unsigned prefix)
+{
+	uint32_t *ra;
+	int i, j;
+
+	if (!la || !r)
+		return false;
+
+	if (r->u.sa.sa_family != AF_INET6)
+		return false;
+
+	if (prefix > 128)
+		prefix = 128;
+
+	ra = (uint32_t *)&r->u.in6.sin6_addr;
+
+	for (i = prefix, j = 0; j < 4; i -= 32, ++j) {
+		uint32_t mask;
+		bool match;
+
+		if (i >= 32)
+			mask = 0xffffffff;
+		else if (i <= 0)
+			mask = 0x00000000;
+		else
+			mask = 0xffffffffu << ( 32 - i );
+
+		match = (la[j] & mask) == (ntohl(ra[j]) & mask);
+
+		if (!match)
+			return false;
+	}
+
+	return true;
+}
+
+
+static const struct policy *policy_table_lookup(const struct sa *sa)
+{
+	size_t i;
+
+	for (i=0; i<ARRAY_SIZE(policy_table); i++) {
+
+		const struct policy *policy = &policy_table[i];
+		bool match;
+
+		match = sa_cmp_prefix(policy->addr, sa, policy->prefix_len);
+		if (match)
+			return policy;
+	}
+
+	return NULL;
+}
+
+
+/*
+ * The policy table is a longest-matching-prefix lookup table
+ */
+static unsigned ipv6_calc_precedence(const struct sa *sa)
+{
+	const struct policy *policy;
+
+	if (AF_INET6 != sa_af(sa)) {
+		re_printf("not an ipv6 address\n");
+		return 0;
+	}
+
+	policy = policy_table_lookup(sa);
+	if (!policy) {
+		warning("net: no matches in policy table for addr (%j)\n", sa);
+		return 0;
+	}
+
+	return policy->precedence;
+}
+
+
+#if 1
+/* only for testing */
+static void pretest(void)
+{
+	struct sa sa;
+	int pre;
+
+	sa_set_str(&sa, "2001:67c:2b8c:3:b065:e5e2:c73:962a", 0);
+
+	pre = ipv6_calc_precedence(&sa);
+	re_printf("pre: %d\n", pre);
+	assert(pre == 40);
+
+	sa_set_str(&sa, "2002:5345:ca62:1:b065:e5e2:c73:962a", 0);
+
+	pre = ipv6_calc_precedence(&sa);
+	re_printf("pre: %d\n", pre);
+	assert(pre == 30);
+}
+#endif
+
+
+struct preaddr {
+	struct sa *addr;
+	unsigned precedence;
+};
+
+static bool ipv6_handler(const char *ifname, const struct sa *sa,
+			 void *arg)
+{
+	struct preaddr *preaddr = arg;
+	unsigned precedence;
+
+	if (AF_INET6 != sa_af(sa))
+		return false;
+
+	precedence = ipv6_calc_precedence(sa);
+
+	info("net: ifaddr:   %10s   %32j   precedence=%u\n",
+		  ifname, sa, precedence);
+
+	if (precedence > preaddr->precedence) {
+		info("net: precedence %u > %u\n",
+		     precedence, preaddr->precedence);
+
+		*preaddr->addr = *sa;
+		preaddr->precedence = precedence;
+	}
+
+	return false;
+}
+
+
+static int default_source_addr_get(int af, struct sa *addr)
+{
+	struct preaddr preaddr;
+
+	if (af != AF_INET6)
+		return EAFNOSUPPORT;
+
+	preaddr.addr = addr;
+	preaddr.precedence = 0;
+
+	return net_getifaddrs(ipv6_handler, &preaddr);
+}
 
 
 static int net_dnssrv_add(struct network *net, const struct sa *sa)
@@ -156,7 +336,7 @@ bool net_check(struct network *net)
 					 sizeof(net->ifname));
 
 #ifdef HAVE_INET6
-		(void)net_default_source_addr_get(AF_INET6, &net->laddr6);
+		(void)default_source_addr_get(AF_INET6, &net->laddr6);
 		(void)net_rt_default_get(AF_INET6, net->ifname6,
 					 sizeof(net->ifname6));
 #endif
@@ -346,7 +526,7 @@ int net_alloc(struct network **netp, const struct config_net *cfg, int af)
 #ifdef HAVE_INET6
 		sa_init(&net->laddr6, AF_INET6);
 
-		(void)net_default_source_addr_get(AF_INET6, &net->laddr6);
+		(void)default_source_addr_get(AF_INET6, &net->laddr6);
 		(void)net_rt_default_get(AF_INET6, net->ifname6,
 					 sizeof(net->ifname6));
 #endif
@@ -364,6 +544,8 @@ int net_alloc(struct network **netp, const struct config_net *cfg, int af)
 #endif
 
 	(void)dns_srv_get(net->domain, sizeof(net->domain), nsv, &nsn);
+
+	pretest();
 
 	info("Local network address: %s %s\n",
 	     buf4, buf6);
