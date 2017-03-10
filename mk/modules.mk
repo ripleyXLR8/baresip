@@ -37,6 +37,7 @@
 #   USE_PLC           Packet Loss Concealment
 #   USE_PORTAUDIO     Portaudio audio driver
 #   USE_PULSE         Pulseaudio audio driver
+#   USE_RASPDOORBELL  Doorbell module
 #   USE_SDL           libSDL video output
 #   USE_SILK          SILK (Skype) audio codec
 #   USE_SNDFILE       sndfile wav dumper
@@ -231,7 +232,9 @@ endif
 endif
 ifeq ($(OS),linux)
 USE_EVDEV := $(shell [ -f $(SYSROOT)/include/linux/input.h ] && echo "yes")
+USE_RASPDOORBELL := yes
 MODULES   += dtmfio
+
 endif
 ifeq ($(OS),win32)
 USE_WINWAVE := yes
@@ -379,6 +382,9 @@ MODULES   += portaudio
 endif
 ifneq ($(USE_PULSE),)
 MODULES   += pulse
+endif
+ifneq ($(USE_RASPDOORBELL),)
+MODULES   += raspbdoorbell
 endif
 ifneq ($(USE_SDL),)
 MODULES   += sdl
