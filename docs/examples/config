@@ -53,6 +53,7 @@ rtp_stats		no
 
 # UI Modules
 module			stdio.so
+#module     raspdoorbell.so
 #module			cons.so
 #module			evdev.so
 #module			httpd.so
